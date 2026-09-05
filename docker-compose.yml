@@ -1,0 +1,33 @@
+# Default path: pull the published image from DockerHub.
+#   docker compose up -d            # pull + run (no local build)
+#   docker compose pull && docker compose up -d   # update
+# Local build override (dev):
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+#
+# Published image: maraudermarauder/cyclewatch (DockerHub, public).
+services:
+  battery-tracker:
+    image: maraudermarauder/cyclewatch:${TAG:-latest}
+    pull_policy: missing
+    container_name: battery-tracker
+    ports:
+      - "${PORT:-3344}:8000"
+    volumes:
+      - ./data:/app/data
+      # Named-volume alternative (avoids host-permission issues):
+      # - battery-data:/app/data
+    environment:
+      - DATA_DIR=/app/data
+    # If the bind-mounted ./data is owned by a different host UID/GID and the
+    # container can't write, uncomment the next line (uses your host IDs):
+    # user: "${UID:-1000}:${GID:-1000}"
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+# Uncomment if you switch to the named volume above:
+# volumes:
+#   battery-data:

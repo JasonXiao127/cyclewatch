@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# App data (SQLite + uploaded .ips copies) — back up separately, don't commit
+data/*.db*
+data/*.db-journal
+data/*.db-wal
+data/*.db-shm
+data/uploads/
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

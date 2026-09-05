@@ -1,0 +1,10 @@
+# Local-build override. Keeps the default compose file pull-only.
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+services:
+  battery-tracker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        VERSION: ${TAG:-dev}

@@ -1,0 +1,5 @@
+# Runtime-only deps for the published Docker image.
+# Pinned from the tested set; bump deliberately, not via floats.
+fastapi==0.138.1
+uvicorn==0.49.0
+python-multipart==0.0.32
