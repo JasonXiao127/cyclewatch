@@ -706,13 +706,22 @@ function renderCharts(allReadings, windowedReadings, { normalizeCapacity = false
       y: { text: "Health %", suffix: "%" }, yExtra: { min: 50, max: 105 },
     },
   ];
-  if (charts["chart-charge"]) { charts["chart-charge"].destroy(); delete charts["chart-charge"]; }
   const xRange = xRangeFor([...allReadings, ...windowedReadings], timeFromMs);
   for (const def of defs) {
     const datasets = buildDatasets(def.rows, def.field);
-    setChartEmpty(def.id, datasets.length === 0);
+    const empty = datasets.length === 0;
+    setChartEmpty(def.id, empty);
     const el = document.getElementById(def.id);
     if (!el) continue;
+    if (empty) {
+      // No points: destroy any stale chart instead of rendering one.
+      // An empty Chart.js line chart falls back to a 0-1ms x-domain
+      // (rendered as 12/31/1969 ticks) and a 0-centered y-range with
+      // grace (rendered as negative cycles/mAh). The overlay from
+      // setChartEmpty carries the empty state on its own.
+      if (charts[def.id]) { charts[def.id].destroy(); delete charts[def.id]; }
+      continue;
+    }
     if (charts[def.id]) {
       charts[def.id].data.datasets = datasets;
       charts[def.id].options = baseOptions(def.y, def.yExtra, def.showSoc, xRange);
