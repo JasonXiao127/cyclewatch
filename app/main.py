@@ -30,7 +30,7 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="Self-Hosted iPhone Battery Tracker", lifespan=lifespan)
+app = FastAPI(title="Cyclewatch", lifespan=lifespan)
 
 
 class DeviceIn(BaseModel):
@@ -67,7 +67,8 @@ class BackupDevice(BaseModel):
 
 
 class BackupFile(BaseModel):
-    app: str = "battery-tracker"
+    # Accepts the legacy "battery-tracker" value from pre-rename exports.
+    app: str = "cyclewatch"
     version: int = 1
     devices: list[BackupDevice] = Field(default_factory=list)
 
@@ -353,7 +354,7 @@ def export_backup(device_ids: str | None = Query(default=None)):
             raise HTTPException(422, "device_ids must be comma-separated integers")
         if not wanted:
             return {
-                "app": "battery-tracker",
+                "app": "cyclewatch",
                 "version": 1,
                 "exported_at": datetime.now(timezone.utc).isoformat(),
                 "devices": [],
@@ -402,7 +403,7 @@ def export_backup(device_ids: str | None = Query(default=None)):
                 }
             )
     return {
-        "app": "battery-tracker",
+        "app": "cyclewatch",
         "version": 1,
         "exported_at": datetime.now(timezone.utc).isoformat(),
         "devices": out_devices,
@@ -414,6 +415,8 @@ def import_backup(payload: BackupFile):
     """Merge a backup file. Matches devices by name, upserts readings by timestamp."""
     if payload.version > 1:
         raise HTTPException(422, f"Unsupported backup version {payload.version}")
+    if payload.app not in ("cyclewatch", "battery-tracker"):
+        raise HTTPException(422, f"Not a Cyclewatch backup file (app={payload.app!r})")
     total = sum(len(d.readings) for d in payload.devices)
     if total > MAX_READINGS:
         raise HTTPException(413, f"Backup too large ({total} readings, max {MAX_READINGS})")

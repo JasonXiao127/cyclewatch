@@ -3,7 +3,7 @@
 FROM python:3.12-slim-bookworm
 
 ARG VERSION=dev
-LABEL org.opencontainers.image.title="iPhone Battery Tracker" \
+LABEL org.opencontainers.image.title="Cyclewatch" \
       org.opencontainers.image.description="Self-hosted iPhone/iPad battery health tracker" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.source="https://github.com/JasonXiao127/cyclewatch"

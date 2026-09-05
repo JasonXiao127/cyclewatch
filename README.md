@@ -1,4 +1,4 @@
-# Self-Hosted iPhone Battery Tracker
+# Cyclewatch
 
 A self-hosted Docker app that extracts battery health data (cycle count,
 charge capacity, battery health %) from Apple's iOS/iPadOS analytics files

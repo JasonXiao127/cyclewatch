@@ -1202,7 +1202,7 @@ if (_importFile) _importFile.addEventListener("change", async () => {
   if (!f) return;
   try {
     state.backupFile = JSON.parse(await f.text());
-    if (!Array.isArray(state.backupFile.devices)) throw new Error("Not a battery-tracker backup file");
+    if (!Array.isArray(state.backupFile.devices)) throw new Error("Not a Cyclewatch backup file");
     renderImportPreview();
   } catch (err) { toast(`Cannot read backup: ${err.message}`, true); }
 });
