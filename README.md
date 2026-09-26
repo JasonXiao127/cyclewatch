@@ -20,13 +20,23 @@ services:
   cyclewatch:
     image: maraudermarauder/cyclewatch:latest
     container_name: cyclewatch
+    pull_policy: missing
     ports:
-      - "3344:8000"
+      - "127.0.0.1:3344:8000"
     volumes:
       - cyclewatch-data:/app/data
     environment:
       - DATA_DIR=/app/data
     restart: unless-stopped
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   cyclewatch-data:
@@ -34,13 +44,17 @@ volumes:
 
 ```bash
 docker compose up -d
-# then open http://<docker-host-ip>:3344/
+# then open http://127.0.0.1:3344/
 ```
+
+> Security: no auth, binds localhost only by default. Do not expose to the
+> internet without a reverse-proxy auth + TLS in front.
 
 The named volume avoids Linux file-permission issues out of the box (the
 container runs as a non-root user). Prefer a visible folder instead? Swap the
 `volumes:` entry for `- ./data:/app/data` — then back up by copying that
-folder. With the named volume, back up from the app's Backup tab, or:
+folder (stop the app first or use sqlite3 `.backup` — copying live WAL DBs can
+corrupt). With the named volume, back up from the app's Backup tab, or:
 
 ```bash
 docker run --rm -v cyclewatch-data:/data -v "$PWD":/backup busybox \
@@ -72,7 +86,8 @@ Pin a version instead of `latest` by changing the image tag to e.g.
 ```bash
 # Pulls maraudermarauder/cyclewatch from DockerHub (published on git tags via CI).
 docker compose up -d
-# then open http://<docker-host-ip>:3344/
+# then open http://127.0.0.1:3344/
+# For LAN access, change ports: in docker-compose.yml to "0.0.0.0:${PORT:-3344}:8000".
 ```
 
 ```bash
@@ -108,8 +123,17 @@ docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 
 ## Data & backups
 
-All state lives in `./data` on the host (SQLite database + a copy of every
-uploaded file). Back it up by copying that folder.
+All state lives in `./data` on the host when running from this repo
+(SQLite database + a copy of every uploaded file). The copy-paste quick-start
+above uses a named volume instead — check `docker volume ls`. Back up via the
+app's Backup tab (includes `truncated` flag when export hits per-device caps),
+or stop the app first / use `sqlite3 .backup` — copying live WAL DBs can
+corrupt. Export omits upload history (`upload_id` resets on import) and
+enforces backup `is_excluded` flags both ways. If the container can't write
+`./data` on Linux, uncomment `user:` in `docker-compose.yml` (uses `UID/GID`
+from `.env` — set in `.env` file, don't `export UID` in bash where `UID` is
+readonly). Upload batches are all-or-nothing; pasted vs file bytes (CRLF/BOM)
+hash differently so cross-endpoint duplicates are by exact bytes.
 
 ## iOS version changes
 
@@ -128,7 +152,7 @@ uvicorn app.main:app --reload --port 3344
 
 ## Publishing to DockerHub (maintainers)
 
-Images publish automatically from the `JasonXiao127/cyclewatch` GitHub repo
+Images publish automatically from the `maraudermarauder/cyclewatch` GitHub repo
 via `.github/workflows/docker-publish.yml` (multi-arch `linux/amd64` +
 `linux/arm64`). One-time setup and first publish:
 

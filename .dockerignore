@@ -9,3 +9,17 @@ venv/
 data/
 README.md
 tests/
+.env
+.env.*
+.dockerignore
+docker-compose*.yml
+.github/
+conftest.py
+requirements.txt
+.vscode/
+.idea/
+.DS_Store
+THEORETICAL_BUGS.md
+*.tar.gz
+*.tgz
+cyclewatch-data-backup*

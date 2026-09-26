@@ -41,7 +41,14 @@ async function api(path, options = {}) {
     try { const body = await res.json(); detail = body.detail || detail; } catch (err) { /* ignore */ }
     throw new Error(detail);
   }
-  return res.json();
+  if (res.status === 204) return null;
+  const text = await res.text();
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error("Unexpected non-JSON response");
+  }
 }
 
 function toast(message, isError = false) {
@@ -158,7 +165,7 @@ function attachSearchSuggest({ inputId, boxId, getFiles = null, onPick }) {
       btn.dataset.idx = String(idx);
       if (item.kind === "device") {
         const dev = devices.find((d) => d.name === item.value);
-        btn.innerHTML = `<span class="dot" style="background:${colorFor(item.value)}"></span><span>${highlightMatch(item.value, q)}</span>` +
+        btn.innerHTML = `<span class="dot" aria-hidden="true" style="background:${colorFor(item.value)}"></span><span>${highlightMatch(item.value, q)}</span>` +
           (dev && dev.readings_count != null ? `<span class="suggest-meta">${dev.readings_count} readings</span>` : "");
       } else {
         btn.innerHTML = `<span>📄 ${highlightMatch(item.value, q)}</span>`;
@@ -213,12 +220,21 @@ function confirmDialog({ title = "Confirm", text = "", inputValue = null, okLabe
     if (inputValue !== null) return Promise.resolve(prompt(text, inputValue));
     return Promise.resolve(confirm(text));
   }
+  if (dlg.open) {
+    try { dlg.close(); } catch { /* ignore */ }
+  }
   $("#confirm-title").textContent = title;
   $("#confirm-text").textContent = text;
   const wrap = $("#confirm-input-wrap");
   const input = $("#confirm-input");
   const ok = $("#confirm-ok");
-  if (inputValue !== null) { wrap.hidden = false; input.value = inputValue; } else { wrap.hidden = true; input.value = ""; }
+  if (inputValue !== null) {
+    wrap.hidden = false;
+    input.value = inputValue;
+    input.setAttribute("aria-label", title);
+    const lbl = wrap.querySelector("label");
+    if (lbl) lbl.textContent = title;
+  } else { wrap.hidden = true; input.value = ""; }
   ok.textContent = okLabel;
   ok.className = danger ? "btn small danger" : "btn small";
   return new Promise((resolve) => {
@@ -233,13 +249,49 @@ function confirmDialog({ title = "Confirm", text = "", inputValue = null, okLabe
 }
 
 /* ---------- tabs ---------- */
+function activateTab(btn) {
+  for (const b of $$(".tab-btn")) {
+    const on = b === btn;
+    b.classList.toggle("active", on);
+    b.setAttribute("aria-selected", on ? "true" : "false");
+    b.tabIndex = on ? 0 : -1;
+  }
+  for (const section of $$(".tab")) section.classList.remove("active");
+  const panel = $("#tab-" + btn.dataset.tab);
+  if (panel) panel.classList.add("active");
+  try { history.replaceState(null, "", "#" + btn.dataset.tab); } catch { /* ignore */ }
+}
 $("#tabs").addEventListener("click", (event) => {
   const btn = event.target.closest(".tab-btn");
   if (!btn) return;
-  for (const b of $$(".tab-btn")) { b.classList.toggle("active", b === btn); b.setAttribute("aria-selected", b === btn ? "true" : "false"); }
-  for (const section of $$(".tab")) section.classList.remove("active");
-  $("#tab-" + btn.dataset.tab).classList.add("active");
+  activateTab(btn);
 });
+$("#tabs").addEventListener("keydown", (event) => {
+  const btns = [...$$(".tab-btn")];
+  const cur = btns.indexOf(document.activeElement);
+  if (cur < 0) return;
+  let next = null;
+  if (event.key === "ArrowRight") next = btns[(cur + 1) % btns.length];
+  else if (event.key === "ArrowLeft") next = btns[(cur - 1 + btns.length) % btns.length];
+  else if (event.key === "Home") next = btns[0];
+  else if (event.key === "End") next = btns[btns.length - 1];
+  if (next) { event.preventDefault(); next.focus(); activateTab(next); }
+});
+(function initTabHash() {
+  const apply = () => {
+    try {
+      const h = (window.location.hash || "").replace("#", "");
+      const btn = h && document.querySelector(`.tab-btn[data-tab="${h}"]`);
+      if (btn) activateTab(btn);
+    } catch { /* ignore */ }
+  };
+  try {
+    const h = (window.location.hash || "").replace("#", "");
+    const btn = h && document.querySelector(`.tab-btn[data-tab="${h}"]`);
+    if (btn) activateTab(btn);
+  } catch { /* ignore */ }
+  window.addEventListener("hashchange", apply);
+})();
 
 /* ---------- devices ---------- */
 async function loadDevices() {
@@ -283,7 +335,7 @@ function renderDevicesTable() {
   for (const device of state.devices) {
     const tr = document.createElement("tr");
     tr.innerHTML = `
-      <td><span class="dot" style="background:${colorFor(device.name)}"></span>${esc(device.name)}</td>
+      <td><span class="dot" aria-hidden="true" style="background:${colorFor(device.name)}"></span>${esc(device.name)}</td>
       <td>${device.readings_count}</td>
       <td>${device.latest_reading ? esc(device.latest_reading.slice(0, 10)) : "-"}</td>
       <td><input type="checkbox" title="Hide all readings from graphs" aria-label="Hide ${esc(device.name)} from graphs" data-act="toggle-device-hidden" data-id="${device.id}" ${device.is_excluded ? "checked" : ""}></td>
@@ -356,12 +408,18 @@ $("#new-device-btn").addEventListener("click", async () => {
 });
 
 /* ---------- upload (native drag-drop + XHR progress, same /api/upload) ---------- */
+function selectedFiles() {
+  const input = $("#file-input");
+  if (!input) return [];
+  if (input._droppedFiles && input._droppedFiles.length) return input._droppedFiles;
+  return [...(input.files || [])];
+}
 function renderFileList() {
   const list = $("#file-list");
   if (!list) return;
-  const files = $("#file-input").files;
+  const files = selectedFiles();
   list.innerHTML = "";
-  [...files].forEach((f) => {
+  files.forEach((f) => {
     const li = document.createElement("li");
     li.innerHTML = `<span>${esc(f.name)}</span><span class="muted">${(f.size / 1024).toFixed(1)} KB</span>`;
     list.appendChild(li);
@@ -372,17 +430,31 @@ function uploadWithProgress(form) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open("POST", "/api/upload");
+    xhr.timeout = 300000;
     const bar = $("#upload-progress");
+    const hideBar = () => { if (bar) bar.hidden = true; };
+    if (bar) { bar.value = 0; bar.hidden = false; }
     xhr.upload.onprogress = (e) => { if (bar && e.lengthComputable) { bar.hidden = false; bar.value = Math.round((e.loaded / e.total) * 100); } };
     xhr.onload = () => {
-      if (bar) bar.hidden = true;
+      hideBar();
+      let data = null;
       try {
-        const data = JSON.parse(xhr.responseText);
-        if (xhr.status >= 200 && xhr.status < 300) resolve(data);
-        else reject(new Error(data.detail || xhr.statusText));
-      } catch (err) { reject(err); }
+        data = xhr.responseText ? JSON.parse(xhr.responseText) : null;
+      } catch {
+        reject(new Error(`Upload failed (${xhr.status}): unexpected response`));
+        return;
+      }
+      if (xhr.status >= 200 && xhr.status < 300) {
+        if (!data || !Array.isArray(data.results)) {
+          reject(new Error("Upload failed: unexpected response"));
+          return;
+        }
+        resolve(data);
+      } else reject(new Error((data && data.detail) || xhr.statusText || `Upload failed (${xhr.status})`));
     };
-    xhr.onerror = () => reject(new Error("Upload failed"));
+    xhr.onerror = () => { hideBar(); reject(new Error("Upload failed")); };
+    xhr.ontimeout = () => { hideBar(); reject(new Error("Upload timed out")); };
+    xhr.onabort = () => { hideBar(); reject(new Error("Upload aborted")); };
     xhr.send(form);
   });
 }
@@ -390,24 +462,31 @@ function uploadWithProgress(form) {
 async function doUpload() {
   const deviceId = $("#upload-device").value;
   if (!deviceId) { toast("Create a device first", true); return; }
-  const files = $("#file-input").files;
+  const files = selectedFiles();
   if (!files.length) { toast("Choose one or more .ips files (or drag & drop, or paste below)", true); return; }
-  for (const file of files) {
-    if (file.size === 0) { toast(`"${file.name}" looks empty — skipped empty files`, true); return; }
-  }
+  const usable = files.filter((f) => f.size > 0);
+  const skipped = files.length - usable.length;
+  if (!usable.length) { toast("All selected files look empty — nothing uploaded", true); return; }
+  if (skipped) toast(`Skipped ${skipped} empty file(s)`);
+  const btn = $("#upload-btn");
+  if (btn) btn.disabled = true;
   const form = new FormData();
   form.append("device_id", deviceId);
-  for (const file of files) form.append("files", file);
+  for (const file of usable) form.append("files", file);
   $("#upload-results").innerHTML = "<p class='muted'>Uploading…</p>";
   try {
     const data = await uploadWithProgress(form);
     renderUploadResults(data.results);
     $("#file-input").value = "";
+    const _fi = $("#file-input");
+    if (_fi) _fi._droppedFiles = null;
     renderFileList();
     await refreshAll();
   } catch (err) {
     $("#upload-results").innerHTML = "";
     toast(err.message, true);
+  } finally {
+    if (btn) btn.disabled = false;
   }
 }
 
@@ -460,7 +539,19 @@ $("#file-input").addEventListener("change", renderFileList);
   ["dragenter", "dragover"].forEach((ev) => zone.addEventListener(ev, (e) => { e.preventDefault(); zone.classList.add("dragover"); }));
   ["dragleave", "drop"].forEach((ev) => zone.addEventListener(ev, (e) => { e.preventDefault(); zone.classList.remove("dragover"); }));
   zone.addEventListener("drop", (e) => {
-    if (e.dataTransfer && e.dataTransfer.files.length) { input.files = e.dataTransfer.files; renderFileList(); }
+    if (e.dataTransfer && e.dataTransfer.files.length) {
+      try {
+        const dt = new DataTransfer();
+        for (const f of e.dataTransfer.files) dt.items.add(f);
+        input.files = dt.files;
+        input._droppedFiles = null;
+      } catch {
+        // Older Safari: files is read-only, stash on input and use it in doUpload.
+        input._droppedFiles = [...e.dataTransfer.files];
+        try { input.files = e.dataTransfer.files; } catch { /* ignore */ }
+      }
+      renderFileList();
+    }
   });
 })();
 
@@ -496,7 +587,12 @@ async function renderUploadHistory() {
 
 function paintUploadHistory() {
   const q = ($("#upload-search") ? $("#upload-search").value : "").toLowerCase();
-  const rows = state.uploads.filter((u) => !q || u.filename.toLowerCase().includes(q) || (u.device_name || "").toLowerCase().includes(q));
+  const rows = (state.uploads || []).filter((u) => {
+    if (!q) return true;
+    const fn = String(u.filename || "").toLowerCase();
+    const dn = String(u.device_name || "").toLowerCase();
+    return fn.includes(q) || dn.includes(q);
+  });
   const tbody = $("#upload-history tbody");
   tbody.innerHTML = "";
   if (!rows.length) {
@@ -508,7 +604,7 @@ function paintUploadHistory() {
     tr.innerHTML = `
       <td title="${esc(upload.uploaded_at ?? "")}">${esc(fmtDate(upload.uploaded_at))}</td>
       <td>${esc(upload.filename)}</td>
-      <td><span class="dot" style="background:${colorFor(upload.device_name)}"></span>${esc(upload.device_name)}</td>
+      <td><span class="dot" aria-hidden="true" style="background:${colorFor(upload.device_name)}"></span>${esc(upload.device_name)}</td>
       <td>${upload.readings_count}</td>
       <td><button class="btn small danger" data-act="delete-upload" data-id="${upload.id}">Delete</button></td>`;
     tbody.appendChild(tr);
@@ -687,11 +783,15 @@ function setChartEmpty(id, empty) {
   const wrap = document.getElementById(id)?.closest(".chart-wrap");
   if (!wrap) return;
   let el = wrap.querySelector(".chart-empty");
-  if (empty && !el) { el = document.createElement("div"); el.className = "chart-empty"; el.textContent = "No points for this filter"; wrap.appendChild(el); }
+  if (empty && !el) { el = document.createElement("div"); el.className = "chart-empty"; el.textContent = "No points for this filter"; el.setAttribute("role", "status"); wrap.appendChild(el); }
   if (!empty && el) el.remove();
 }
 
 function renderCharts(allReadings, windowedReadings, { normalizeCapacity = false, timeFromMs = null } = {}) {
+  if (typeof Chart === "undefined") {
+    for (const id of ["chart-cycles", "chart-capacity", "chart-health"]) setChartEmpty(id, true);
+    return;
+  }
   const defs = [
     { id: "chart-cycles", field: "cycle_count", rows: allReadings, y: { text: "Cycles" }, yExtra: { beginAtZero: false } },
     {
@@ -900,8 +1000,10 @@ function renderStatsCards(readings, opts = {}) {
     let delta = "";
     if (prev) {
       const parts = [];
-      if (latest.cycle_count != null && prev.cycle_count != null && latest.cycle_count !== prev.cycle_count)
-        parts.push(`+${latest.cycle_count - prev.cycle_count} cycles`);
+      if (latest.cycle_count != null && prev.cycle_count != null && latest.cycle_count !== prev.cycle_count) {
+        const dc = latest.cycle_count - prev.cycle_count;
+        parts.push(`${dc > 0 ? "+" : ""}${dc} cycles`);
+      }
       const cap = latest.full_charge_capacity_mah ?? latest.nominal_capacity_mah;
       const pcap = prev.full_charge_capacity_mah ?? prev.nominal_capacity_mah;
       if (cap != null && pcap != null && cap !== pcap) {
@@ -919,7 +1021,7 @@ function renderStatsCards(readings, opts = {}) {
       ? `<p><strong>${latest.battery_level_pct}%</strong> charge at capture</p>`
       : `<p class="muted">No charge data</p>`;
     card.innerHTML = `
-      <h3><span class="dot" style="background:${colorFor(name)}"></span>${esc(name)}${notes}</h3>
+      <h3><span class="dot" aria-hidden="true" style="background:${colorFor(name)}"></span>${esc(name)}${notes}</h3>
       <p class="stat-date" title="${esc(latest.timestamp ?? "")}">${esc(fmtDate(latest.timestamp))}</p>
       <p><strong>${latest.cycle_count ?? "-"}</strong> cycles</p>
       <p>${capLine}</p>
@@ -950,9 +1052,21 @@ function sortedFilteredData() {
     !q || String(r.timestamp || "").toLowerCase().includes(q) || String(r.device_name || "").toLowerCase().includes(q));
   const { key, dir } = state.dataSort;
   rows = [...rows].sort((a, b) => {
-    const av = a[key] ?? "";
-    const bv = b[key] ?? "";
-    if (typeof av === "number" || typeof bv === "number") return ((av ?? -1e18) - (bv ?? -1e18)) * dir;
+    const av = a[key];
+    const bv = b[key];
+    const aNull = av == null || av === "";
+    const bNull = bv == null || bv === "";
+    if (aNull && bNull) return 0;
+    if (aNull) return 1;
+    if (bNull) return -1;
+    if (typeof av === "number" || typeof bv === "number") {
+      const an = typeof av === "number" ? av : Number(av);
+      const bn = typeof bv === "number" ? bv : Number(bv);
+      if (Number.isNaN(an) && Number.isNaN(bn)) return 0;
+      if (Number.isNaN(an)) return 1;
+      if (Number.isNaN(bn)) return -1;
+      return (an - bn) * dir;
+    }
     return String(av).localeCompare(String(bv)) * dir;
   });
   return rows;
@@ -971,6 +1085,13 @@ function paintData() {
   const nextBtn = $("#data-next");
   if (prevBtn) prevBtn.disabled = state.dataPage <= 0;
   if (nextBtn) nextBtn.disabled = state.dataPage >= pages - 1;
+  // Sync sort headers even on empty result so stale arrows don't freeze.
+  $$("#readings-table th.sortable").forEach((th) => {
+    const active = th.dataset.sort === state.dataSort.key;
+    th.textContent = th.textContent.replace(/ [▲▼]$/, "") + (active ? (state.dataSort.dir === 1 ? " ▲" : " ▼") : "");
+    if (active) th.setAttribute("aria-sort", state.dataSort.dir === 1 ? "ascending" : "descending");
+    else th.removeAttribute("aria-sort");
+  });
   const tbody = $("#readings-table tbody");
   tbody.innerHTML = "";
   if (!slice.length) {
@@ -984,7 +1105,7 @@ function paintData() {
       ? `${r.battery_level_pct}%${r.min_soc_pct != null && r.max_soc_pct != null ? ` <span class="muted">(day ${r.min_soc_pct}-${r.max_soc_pct}%)</span>` : ""}`
       : "-";
     tr.innerHTML = `
-      <td><span class="dot" style="background:${colorFor(r.device_name)}"></span>${esc(r.device_name)}</td>
+      <td><span class="dot" aria-hidden="true" style="background:${colorFor(r.device_name)}"></span>${esc(r.device_name)}</td>
       <td title="${esc(r.timestamp ?? "")}">${esc(fmtDate(r.timestamp))}${r.date_source === "fallback" ? " <span class='badge warn'>fallback</span>" : ""}</td>
       <td>${r.cycle_count ?? "-"}</td>
       <td>${r.full_charge_capacity_mah ?? "-"}</td>
@@ -1001,19 +1122,23 @@ function paintData() {
       </td>`;
     tbody.appendChild(tr);
   }
-  $$("#readings-table th.sortable").forEach((th) => {
-    const active = th.dataset.sort === state.dataSort.key;
-    th.textContent = th.textContent.replace(/ [▲▼]$/, "") + (active ? (state.dataSort.dir === 1 ? " ▲" : " ▼") : "");
-  });
 }
 
+function toggleSort(th, fromKeyboard = false) {
+  const key = th.dataset.sort;
+  if (!key) return;
+  if (state.dataSort.key === key) state.dataSort.dir *= -1;
+  else state.dataSort = { key, dir: 1 };
+  paintData();
+  if (fromKeyboard) {
+    const active = document.querySelector(`#readings-table th[data-sort="${key}"]`);
+    if (active) active.focus({ preventScroll: true });
+  }
+}
 $("#readings-table").addEventListener("click", async (event) => {
   const th = event.target.closest("th.sortable");
   if (th) {
-    const key = th.dataset.sort;
-    if (state.dataSort.key === key) state.dataSort.dir *= -1;
-    else state.dataSort = { key, dir: 1 };
-    paintData();
+    toggleSort(th, false);
     return;
   }
   const btn = event.target.closest("button[data-act='delete-reading']");
@@ -1027,6 +1152,13 @@ $("#readings-table").addEventListener("click", async (event) => {
   } catch (err) { toast(err.message, true); }
 });
 
+$("#readings-table").addEventListener("keydown", (event) => {
+  const th = event.target.closest("th.sortable");
+  if (th && (event.key === "Enter" || event.key === " ")) {
+    event.preventDefault();
+    toggleSort(th, true);
+  }
+});
 $("#readings-table").addEventListener("change", async (event) => {
   const input = event.target.closest("input[data-act='toggle-reading-hidden']");
   if (!input) return;
@@ -1040,17 +1172,17 @@ $("#readings-table").addEventListener("change", async (event) => {
   } catch (err) { toast(err.message, true); }
 });
 
-["#data-device", "#data-include-excluded"].forEach((sel) => $(sel).addEventListener("change", loadData));
+["#data-device", "#data-include-excluded"].forEach((sel) => $(sel).addEventListener("change", () => loadData().catch((e) => toast(e.message, true))));
 const _search = $("#data-search");
 if (_search) _search.addEventListener("input", () => { state.dataPage = 0; paintData(); });
 const _usearch = $("#upload-search");
-if (_usearch) _usearch.addEventListener("input", paintUploadHistory);
+if (_usearch) _usearch.addEventListener("input", () => { try { paintUploadHistory(); } catch (e) { toast(e.message, true); } });
 const _prev = $("#data-prev");
 if (_prev) _prev.addEventListener("click", () => { state.dataPage--; paintData(); });
 const _next = $("#data-next");
 if (_next) _next.addEventListener("click", () => { state.dataPage++; paintData(); });
 const _uploadFilter = $("#upload-filter");
-if (_uploadFilter) _uploadFilter.addEventListener("change", renderUploadHistory);
+if (_uploadFilter) _uploadFilter.addEventListener("change", () => renderUploadHistory().catch((e) => toast(e.message, true)));
 
 attachSearchSuggest({ inputId: "data-search", boxId: "data-search-suggest" });
 attachSearchSuggest({ inputId: "upload-search", boxId: "upload-search-suggest", getFiles: true });
@@ -1133,7 +1265,7 @@ async function doExport() {
   const checked = [...document.querySelectorAll("#export-list input:checked")].map((el) => el.dataset.deviceId);
   if (!checked.length) { toast("Select at least one device", true); return; }
   try {
-    const data = await api(`/api/export?device_ids=${checked.map(encodeURIComponent).join(",")}`);
+    const data = await api(`/api/export?device_ids=${checked.map((v) => encodeURIComponent(v)).join(",")}`);
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
@@ -1141,7 +1273,14 @@ async function doExport() {
     document.body.appendChild(a);
     a.click();
     setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
-    toast(`Exported ${data.devices.length} device(s)`);
+    if (data.truncated) {
+      const names = (data.truncated_devices || []).join(", ");
+      toast(`Exported ${data.devices.length} device(s) — truncated${names ? `: ${names}` : ""}. Use selective export.`, true);
+    } else if (data.missing_device_ids && data.missing_device_ids.length) {
+      toast(`Exported ${data.devices.length} device(s) — unknown ids: ${data.missing_device_ids.join(", ")}`, true);
+    } else {
+      toast(`Exported ${data.devices.length} device(s)`);
+    }
   } catch (err) { toast(err.message, true); }
 }
 
@@ -1185,7 +1324,11 @@ async function doImport() {
       resultsBox.innerHTML = "";
       for (const r of data.results) {
         const p = document.createElement("p");
-        p.innerHTML = `<span class="badge ok">${r.new_readings} new</span> ${esc(r.name)} — ${r.new_readings} new, ${r.updated_readings} updated.`;
+        if (r.status === "skipped") {
+          p.innerHTML = `<span class="badge warn">skipped</span> ${esc(r.name)} — ${esc(r.reason || "skipped")}.`;
+        } else {
+          p.innerHTML = `<span class="badge ok">${r.new_readings ?? 0} new</span> ${esc(r.name)} — ${r.new_readings ?? 0} new, ${r.updated_readings ?? 0} updated${r.skipped ? `, ${r.skipped} skipped` : ""}.`;
+        }
         resultsBox.appendChild(p);
       }
     }

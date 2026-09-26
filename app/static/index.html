@@ -16,17 +16,17 @@
       <span class="count-badge" id="device-count" title="Devices tracked">0 devices</span>
     </div>
     <nav id="tabs" role="tablist" aria-label="Primary">
-      <button class="tab-btn active" data-tab="dashboard" role="tab" aria-selected="true">Dashboard</button>
-      <button class="tab-btn" data-tab="upload" role="tab" aria-selected="false">Upload</button>
-      <button class="tab-btn" data-tab="data" role="tab" aria-selected="false">Data</button>
-      <button class="tab-btn" data-tab="devices" role="tab" aria-selected="false">Devices</button>
-      <button class="tab-btn" data-tab="backup" role="tab" aria-selected="false">Backup</button>
+      <button class="tab-btn active" data-tab="dashboard" role="tab" id="tabbtn-dashboard" aria-selected="true" aria-controls="tab-dashboard">Dashboard</button>
+      <button class="tab-btn" data-tab="upload" role="tab" id="tabbtn-upload" aria-selected="false" aria-controls="tab-upload" tabindex="-1">Upload</button>
+      <button class="tab-btn" data-tab="data" role="tab" id="tabbtn-data" aria-selected="false" aria-controls="tab-data" tabindex="-1">Data</button>
+      <button class="tab-btn" data-tab="devices" role="tab" id="tabbtn-devices" aria-selected="false" aria-controls="tab-devices" tabindex="-1">Devices</button>
+      <button class="tab-btn" data-tab="backup" role="tab" id="tabbtn-backup" aria-selected="false" aria-controls="tab-backup" tabindex="-1">Backup</button>
     </nav>
     <div class="header-spacer"></div>
     <button id="theme-toggle" class="icon-btn" title="Toggle dark / light mode" aria-label="Toggle theme">🌓</button>
   </header>
   <main>
-    <section id="tab-dashboard" class="tab active" role="tabpanel">
+    <section id="tab-dashboard" class="tab active" role="tabpanel" aria-labelledby="tabbtn-dashboard">
       <div class="card filters">
         <div class="toolbar">
           <label for="dash-device">Device: <select id="dash-device"></select></label>
@@ -63,13 +63,13 @@
       </div>
       <div id="stats-cards" class="cards"></div>
       <div class="charts-grid">
-        <div class="chart-box"><h2>Cycle count</h2><p class="chart-sub">Higher = more wear. One line per device.</p><div class="chart-wrap"><canvas id="chart-cycles"></canvas></div></div>
-        <div class="chart-box"><h2>Charge capacity (mAh)</h2><p class="chart-sub">Full-charge (AppleRawMaxCapacity, else nominal). Full can exceed nominal on newer iOS — see Design column in Data tab.</p><div class="chart-wrap"><canvas id="chart-capacity"></canvas></div></div>
-        <div class="chart-box"><h2>Battery health (%)</h2><p class="chart-sub">Apple-reported MaximumCapacityPercent when present, else computed full/design or nominal/design.</p><div class="chart-wrap"><canvas id="chart-health"></canvas></div></div>
+        <div class="chart-box"><h2>Cycle count</h2><p class="chart-sub">Higher = more wear. One line per device.</p><div class="chart-wrap"><canvas id="chart-cycles" role="img" aria-label="Cycle count over time"></canvas></div></div>
+        <div class="chart-box"><h2>Charge capacity (mAh)</h2><p class="chart-sub">Full-charge (AppleRawMaxCapacity, else nominal). Full can exceed nominal on newer iOS — see Design column in Data tab.</p><div class="chart-wrap"><canvas id="chart-capacity" role="img" aria-label="Charge capacity over time"></canvas></div></div>
+        <div class="chart-box"><h2>Battery health (%)</h2><p class="chart-sub">Apple-reported MaximumCapacityPercent when present, else computed full/design or nominal/design.</p><div class="chart-wrap"><canvas id="chart-health" role="img" aria-label="Battery health over time"></canvas></div></div>
       </div>
     </section>
 
-    <section id="tab-upload" class="tab" role="tabpanel">
+    <section id="tab-upload" class="tab" role="tabpanel" aria-labelledby="tabbtn-upload">
       <div class="card">
         <h2>Submit analytics files</h2>
         <div class="toolbar">
@@ -86,7 +86,7 @@
         </div>
         <div class="toolbar">
           <button id="upload-btn" class="btn">Upload &amp; extract</button>
-          <progress id="upload-progress" value="0" max="100" hidden></progress>
+          <progress id="upload-progress" value="0" max="100" hidden aria-label="Upload progress"></progress>
         </div>
         <div id="upload-results" role="status"></div>
       </div>
@@ -106,37 +106,37 @@
         <h2>Upload history</h2>
         <div class="toolbar">
           <label>Device: <select id="upload-filter"></select></label>
-          <label><span class="sr-only">Search uploads</span><span class="search-wrap"><input type="search" id="upload-search" placeholder="Search filename…" autocomplete="off" role="combobox" aria-expanded="false" aria-controls="upload-search-suggest"><div id="upload-search-suggest" class="suggest" role="listbox" hidden></div></span></label>
+          <label><span class="sr-only">Search uploads</span><span class="search-wrap"><input type="search" id="upload-search" placeholder="Search filename…" autocomplete="off" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="upload-search-suggest"><div id="upload-search-suggest" class="suggest" role="listbox" hidden></div></span></label>
         </div>
         <div class="table-wrap">
         <table class="data-table" id="upload-history">
-          <thead><tr><th>Uploaded</th><th>File</th><th>Device</th><th>Readings</th><th><span class="sr-only">Actions</span></th></tr></thead>
+          <thead><tr><th scope="col">Uploaded</th><th scope="col">File</th><th scope="col">Device</th><th scope="col">Readings</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
           <tbody></tbody>
         </table>
         </div>
       </div>
     </section>
 
-    <section id="tab-data" class="tab" role="tabpanel">
+    <section id="tab-data" class="tab" role="tabpanel" aria-labelledby="tabbtn-data">
       <div class="card filters">
         <div class="toolbar">
           <label>Device: <select id="data-device"></select></label>
           <label class="check"><input type="checkbox" id="data-include-excluded"> Include hidden</label>
-          <label><span class="sr-only">Search readings</span><span class="search-wrap"><input type="search" id="data-search" placeholder="Search date / device…" autocomplete="off" role="combobox" aria-expanded="false" aria-controls="data-search-suggest"><div id="data-search-suggest" class="suggest" role="listbox" hidden></div></span></label>
+          <label><span class="sr-only">Search readings</span><span class="search-wrap"><input type="search" id="data-search" placeholder="Search date / device…" autocomplete="off" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="data-search-suggest"><div id="data-search-suggest" class="suggest" role="listbox" hidden></div></span></label>
           <span id="readings-count" class="muted" role="status"></span>
         </div>
       </div>
       <div class="table-wrap">
       <table class="data-table" id="readings-table">
         <thead><tr>
-          <th data-sort="device_name" class="sortable">Device</th>
-          <th data-sort="timestamp" class="sortable" title="Date inside the analytics file (or fallback)">Reading date</th>
-          <th data-sort="cycle_count" class="sortable">Cycle count</th>
-          <th data-sort="full_charge_capacity_mah" class="sortable" title="Full-charge capacity (AppleRawMaxCapacity / FullChargeCapacity)">Full (mAh)</th>
-          <th data-sort="nominal_capacity_mah" class="sortable" title="Nominal charge capacity">Nominal (mAh)</th>
-          <th data-sort="design_capacity_mah" class="sortable" title="Design capacity (often missing on newer iOS)">Design (mAh)</th>
-          <th data-sort="health_pct" class="sortable" title="Apple-reported % when present, else computed full/design or nominal/design">Health</th>
-          <th title="Instant charge when file was written (UISOC); day range from DailyMin/DailyMax">Charge %</th><th>Source</th><th title="Exclude from graphs">Hidden</th><th>Actions</th>
+          <th scope="col" data-sort="device_name" class="sortable" tabindex="0" role="columnheader" aria-label="Sort by device">Device</th>
+          <th scope="col" data-sort="timestamp" class="sortable" tabindex="0" role="columnheader" aria-label="Sort by reading date" title="Date inside the analytics file (or fallback)">Reading date</th>
+          <th scope="col" data-sort="cycle_count" class="sortable" tabindex="0" role="columnheader" aria-label="Sort by cycle count">Cycle count</th>
+          <th scope="col" data-sort="full_charge_capacity_mah" class="sortable" tabindex="0" role="columnheader" aria-label="Sort by full capacity" title="Full-charge capacity (AppleRawMaxCapacity / FullChargeCapacity)">Full (mAh)</th>
+          <th scope="col" data-sort="nominal_capacity_mah" class="sortable" tabindex="0" role="columnheader" aria-label="Sort by nominal capacity" title="Nominal charge capacity">Nominal (mAh)</th>
+          <th scope="col" data-sort="design_capacity_mah" class="sortable" tabindex="0" role="columnheader" aria-label="Sort by design capacity" title="Design capacity (often missing on newer iOS)">Design (mAh)</th>
+          <th scope="col" data-sort="health_pct" class="sortable" tabindex="0" role="columnheader" aria-label="Sort by health" title="Apple-reported % when present, else computed full/design or nominal/design">Health</th>
+          <th scope="col" title="Instant charge when file was written (UISOC); day range from DailyMin/DailyMax">Charge %</th><th scope="col">Source</th><th scope="col" title="Exclude from graphs">Hidden</th><th scope="col">Actions</th>
         </tr></thead>
         <tbody></tbody>
       </table>
@@ -148,7 +148,7 @@
       </div>
     </section>
 
-    <section id="tab-devices" class="tab" role="tabpanel">
+    <section id="tab-devices" class="tab" role="tabpanel" aria-labelledby="tabbtn-devices">
       <div class="card">
         <h2>Add device</h2>
         <div class="toolbar">
@@ -158,13 +158,13 @@
       </div>
       <div class="table-wrap">
       <table class="data-table" id="devices-table">
-        <thead><tr><th>Name</th><th>Readings</th><th>Latest</th><th>Hidden</th><th><span class="sr-only">Actions</span></th></tr></thead>
+        <thead><tr><th scope="col">Name</th><th scope="col">Readings</th><th scope="col">Latest</th><th scope="col">Hidden</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
         <tbody></tbody>
       </table>
       </div>
     </section>
 
-    <section id="tab-backup" class="tab" role="tabpanel">
+    <section id="tab-backup" class="tab" role="tabpanel" aria-labelledby="tabbtn-backup">
       <div class="card">
         <h2>Export backup (JSON)</h2>
         <p class="muted">Devices + readings only. Pick devices, then download a versioned JSON file.</p>
@@ -191,21 +191,23 @@
       </div>
     </section>
   </main>
-  <footer>Cyclewatch · data lives in <code>./data</code> — back it up by copying that folder.</footer>
+  <footer>Cyclewatch · data lives in <code>/app/data</code> (<code>./data</code> bind or named volume) — back up from the Backup tab.</footer>
   <div id="toasts" aria-live="polite"></div>
-  <dialog id="confirm-modal">
+  <dialog id="confirm-modal" aria-labelledby="confirm-title" aria-describedby="confirm-text">
     <h3 id="confirm-title" style="margin-top:0">Confirm</h3>
     <p id="confirm-text" class="muted"></p>
     <div id="confirm-input-wrap" hidden>
-      <input type="text" id="confirm-input" style="width:100%">
+      <label for="confirm-input" class="sr-only">Value</label>
+      <input type="text" id="confirm-input" style="width:100%" aria-label="Value">
     </div>
     <div class="dialog-actions">
       <button id="confirm-cancel" class="btn small subtle">Cancel</button>
       <button id="confirm-ok" class="btn small">Confirm</button>
     </div>
   </dialog>
-  <script src="/static/vendor/chart.umd.min.js"></script>
-  <script>if (typeof Chart === "undefined") { var _s = document.createElement("script"); _s.src = "https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"; _s.defer = true; document.head.appendChild(_s); }</script>
-  <script src="/static/app.js?v=5"></script>
+  <!-- Vendor: Chart.js v4.4.3 UMD from https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js
+       Bump ?v= query when updating vendor to bust cache. sourceMappingURL stripped (no .map vendored). -->
+  <script src="/static/vendor/chart.umd.min.js?v=4.4.3"></script>
+  <script src="/static/app.js?v=8"></script>
 </body>
 </html>

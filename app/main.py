@@ -38,7 +38,7 @@ class DeviceIn(BaseModel):
 
 
 class DevicePatch(BaseModel):
-    name: str | None = None
+    name: str | None = Field(default=None, min_length=1, max_length=200)
     is_excluded: bool | None = None
 
 
@@ -53,7 +53,7 @@ class BackupReading(BaseModel):
     nominal_capacity_mah: int | None = Field(default=None, ge=0)
     full_charge_capacity_mah: int | None = Field(default=None, ge=0)
     design_capacity_mah: int | None = Field(default=None, ge=0)
-    health_pct: float | None = Field(default=None, ge=0, le=100)
+    health_pct: float | None = Field(default=None, ge=0, le=200)
     battery_level_pct: int | None = Field(default=None, ge=0, le=100)
     min_soc_pct: int | None = Field(default=None, ge=0, le=100)
     max_soc_pct: int | None = Field(default=None, ge=0, le=100)
@@ -61,7 +61,7 @@ class BackupReading(BaseModel):
 
 
 class BackupDevice(BaseModel):
-    name: str
+    name: str = Field(min_length=1, max_length=200)
     is_excluded: bool = False
     readings: list[BackupReading] = Field(default_factory=list)
 
@@ -129,13 +129,17 @@ def update_device(device_id: int, payload: DevicePatch):
         if not conn.execute("SELECT 1 FROM devices WHERE id = ?", (device_id,)).fetchone():
             raise HTTPException(404, "Device not found")
         try:
-            conn.execute(
+            cur = conn.execute(
                 f"UPDATE devices SET {', '.join(updates)} WHERE id = ?",
                 (*params, device_id),
             )
+            if cur.rowcount == 0:
+                raise HTTPException(404, "Device not found")
         except sqlite3.IntegrityError:
             raise HTTPException(409, "A device with that name already exists")
         device = conn.execute("SELECT * FROM devices WHERE id = ?", (device_id,)).fetchone()
+        if device is None:
+            raise HTTPException(404, "Device not found")
     return dict(device)
 
 
@@ -148,8 +152,11 @@ def delete_device(device_id: int):
             "SELECT DISTINCT sha256 FROM uploads WHERE device_id = ?", (device_id,)
         ).fetchall()
         conn.execute("DELETE FROM devices WHERE id = ?", (device_id,))
-        for row in obsolete:
-            db.delete_upload_files_if_orphaned(conn, row[0])
+        shas = [row[0] for row in obsolete]
+    # Delete files only after DB commit so rollback cannot resurrect rows with missing files.
+    with db.get_connection() as conn2:
+        for sha in shas:
+            db.delete_upload_files_if_orphaned(conn2, sha)
     return {"deleted": device_id}
 
 
@@ -176,24 +183,109 @@ def _store_parsed_upload(
     if len(parsed["readings"]) > MAX_READINGS:
         raise HTTPException(413, f"Too many readings (max {MAX_READINGS})")
     sha256 = hashlib.sha256(raw).hexdigest()
+    dest = db.upload_path_for_sha(sha256)
     duplicate = conn.execute(
         "SELECT id FROM uploads WHERE device_id = ? AND sha256 = ?",
         (device_id, sha256),
     ).fetchone()
     if duplicate:
-        return {"filename": filename, "status": "duplicate", "readings_found": 0, "new_readings": 0}
+        # Reconcile crash window: row committed but file replace never ran.
+        try:
+            if not os.path.isfile(dest):
+                os.makedirs(db.get_uploads_dir(), exist_ok=True)
+                with open(dest, "wb") as fh:
+                    fh.write(raw)
+        except OSError:
+            pass
+        others = conn.execute(
+            """SELECT d.name FROM uploads u
+               JOIN devices d ON d.id = u.device_id
+               WHERE u.sha256 = ? AND u.device_id != ?
+               GROUP BY d.name ORDER BY d.name COLLATE NOCASE""",
+            (sha256, device_id),
+        ).fetchall()
+        return {
+            "filename": filename,
+            "status": "duplicate",
+            "readings_found": 0,
+            "new_readings": 0,
+            "updated_readings": 0,
+            "unrecognized_keys": parsed.get("unrecognized_keys", []),
+            "cross_device_duplicate": [row[0] for row in others],
+        }
     os.makedirs(db.get_uploads_dir(), exist_ok=True)
-    with open(db.upload_path_for_sha(sha256), "wb") as fh:
-        fh.write(raw)
-    cur = conn.execute(
-        "INSERT INTO uploads (device_id, filename, sha256, readings_found) VALUES (?, ?, ?, ?)",
-        (device_id, filename, sha256, len(parsed["readings"])),
-    )
+    tmp_path = dest + ".tmp"
+    try:
+        with open(tmp_path, "wb") as fh:
+            fh.write(raw)
+        try:
+            cur = conn.execute(
+                "INSERT INTO uploads (device_id, filename, sha256, readings_found) VALUES (?, ?, ?, ?)",
+                (device_id, filename, sha256, len(parsed["readings"])),
+            )
+        except sqlite3.IntegrityError as exc:
+            try:
+                if os.path.isfile(tmp_path):
+                    os.remove(tmp_path)
+            except OSError:
+                pass
+            # Distinguish FK (device deleted concurrently) from duplicate race.
+            # Prefer errorcode (787 = FOREIGNKEY) over locale-dependent message.
+            code = getattr(exc, "sqlite_errorcode", None)
+            is_fk = code == 787 if code is not None else ("foreign key" in str(exc).lower())
+            if is_fk:
+                if not conn.execute("SELECT 1 FROM devices WHERE id = ?", (device_id,)).fetchone():
+                    raise HTTPException(404, "Device not found")
+                raise
+            if code is not None and code not in (2067, 1555):
+                # Future CHECK/NOT NULL constraints must not masquerade as duplicate.
+                raise
+            others = conn.execute(
+                """SELECT d.name FROM uploads u
+                   JOIN devices d ON d.id = u.device_id
+                   WHERE u.sha256 = ? AND u.device_id != ?
+                   GROUP BY d.name ORDER BY d.name COLLATE NOCASE""",
+                (sha256, device_id),
+            ).fetchall()
+            return {
+                "filename": filename,
+                "status": "duplicate",
+                "readings_found": 0,
+                "new_readings": 0,
+                "updated_readings": 0,
+                "unrecognized_keys": parsed.get("unrecognized_keys", []),
+                "cross_device_duplicate": [row[0] for row in others],
+            }
+        os.replace(tmp_path, dest)
+    except HTTPException:
+        raise
+    except Exception:
+        try:
+            if os.path.isfile(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
     upload_id = cur.lastrowid
-    new_count = 0
-    for reading in parsed["readings"]:
-        if db.upsert_reading(conn, device_id, upload_id, reading, today):
-            new_count += 1
+    try:
+        new_count = 0
+        for reading in parsed["readings"]:
+            if db.upsert_reading(conn, device_id, upload_id, reading, today):
+                new_count += 1
+    except Exception:
+        # Rollback will remove DB rows but dest file is already replaced.
+        # Remove it now if no other upload references this sha (including
+        # uncommitted rows in this txn).
+        try:
+            still = conn.execute(
+                "SELECT 1 FROM uploads WHERE sha256 = ? AND id != ? LIMIT 1",
+                (sha256, upload_id),
+            ).fetchone()
+            if not still and os.path.isfile(dest):
+                os.remove(dest)
+        except OSError:
+            pass
+        raise
     others = conn.execute(
         """SELECT d.name FROM uploads u
            JOIN devices d ON d.id = u.device_id
@@ -214,21 +306,40 @@ def _store_parsed_upload(
 
 @app.post("/api/upload")
 async def upload_files(device_id: int = Form(...), files: list[UploadFile] = File(...)):
+    """Upload one batch. All-or-nothing: one bad file rolls back the whole batch.
+
+    Note: up to MAX_UPLOAD_FILES * MAX_UPLOAD_BYTES per request; sequential
+    reads keep peak to one file + parsed readings.
+    """
     if len(files) > MAX_UPLOAD_FILES:
         raise HTTPException(413, f"Too many files (max {MAX_UPLOAD_FILES})")
-    with db.get_connection() as conn:
-        device = conn.execute("SELECT id FROM devices WHERE id = ?", (device_id,)).fetchone()
-        if device is None:
-            raise HTTPException(404, "Device not found")
-        results = []
-        today = date.today()
-        for upload_file in files:
-            raw = await upload_file.read()
-            if len(raw) > MAX_UPLOAD_BYTES:
-                raise HTTPException(413, f"File too large (max {MAX_UPLOAD_BYTES // 1024 // 1024} MB)")
-            filename = _sanitize_filename(upload_file.filename, "unnamed.ips")
-            parsed = parse_ips_file(raw.decode("utf-8", errors="replace"))
-            results.append(_store_parsed_upload(conn, device_id, filename, raw, parsed, today))
+    created_shas: list[str] = []
+    try:
+        with db.get_connection() as conn:
+            device = conn.execute("SELECT id FROM devices WHERE id = ?", (device_id,)).fetchone()
+            if device is None:
+                raise HTTPException(404, "Device not found")
+            results = []
+            today = date.today()
+            for upload_file in files:
+                raw = await upload_file.read()
+                if len(raw) > MAX_UPLOAD_BYTES:
+                    raise HTTPException(413, f"File too large (max {MAX_UPLOAD_BYTES // 1024 // 1024} MB)")
+                filename = _sanitize_filename(upload_file.filename, "unnamed.ips")
+                parsed = parse_ips_file(raw.decode("utf-8", errors="replace"))
+                results.append(_store_parsed_upload(conn, device_id, filename, raw, parsed, today))
+                sha = hashlib.sha256(raw).hexdigest()
+                if sha not in created_shas:
+                    created_shas.append(sha)
+    except Exception:
+        # Batch rolled back but dest files were already replaced. Clean orphans.
+        try:
+            with db.get_connection() as conn2:
+                for sha in created_shas:
+                    db.delete_upload_files_if_orphaned(conn2, sha)
+        except Exception:
+            pass
+        raise
     return {"results": results}
 
 
@@ -294,7 +405,8 @@ def delete_upload(upload_id: int):
         # previously overwritten by a newer upload are left intact.
         conn.execute("DELETE FROM readings WHERE upload_id = ?", (upload_id,))
         conn.execute("DELETE FROM uploads WHERE id = ?", (upload_id,))
-        db.delete_upload_files_if_orphaned(conn, sha256)
+    with db.get_connection() as conn2:
+        db.delete_upload_files_if_orphaned(conn2, sha256)
     return {"deleted": upload_id}
 
 
@@ -348,18 +460,21 @@ def export_backup(device_ids: str | None = Query(default=None)):
     """Export devices + readings as JSON. device_ids=1,2 selects a subset."""
     wanted: set[int] | None = None
     if device_ids is not None:
+        if not device_ids.strip():
+            raise HTTPException(422, "device_ids must not be empty")
         try:
             wanted = {int(p) for p in device_ids.split(",") if p.strip()}
         except ValueError:
             raise HTTPException(422, "device_ids must be comma-separated integers")
         if not wanted:
-            return {
-                "app": "cyclewatch",
-                "version": 1,
-                "exported_at": datetime.now(timezone.utc).isoformat(),
-                "devices": [],
-            }
+            raise HTTPException(422, "device_ids must not be empty")
+        if len(wanted) > 1000:
+            raise HTTPException(422, "Too many device_ids (max 1000)")
+        for v in wanted:
+            if v <= 0:
+                raise HTTPException(422, "device_ids must be positive integers")
     with db.get_connection() as conn:
+        missing_device_ids: list[int] = []
         if wanted is not None:
             placeholders = ",".join("?" for _ in wanted)
             devices = conn.execute(
@@ -367,19 +482,41 @@ def export_backup(device_ids: str | None = Query(default=None)):
                 " ORDER BY name COLLATE NOCASE",
                 tuple(wanted),
             ).fetchall()
+            found_ids = {d["id"] for d in devices}
+            missing_device_ids = sorted(wanted - found_ids)
         else:
             devices = conn.execute(
                 "SELECT id, name, is_excluded FROM devices ORDER BY name COLLATE NOCASE"
             ).fetchall()
         out_devices = []
-        for dev in devices:
+        truncated = False
+        truncated_devices: list[str] = []
+        total = 0
+        # Total cap matches import limit so non-truncated exports round-trip.
+        # Larger DBs must use selective export (device_ids=...).
+        MAX_EXPORT_TOTAL = MAX_READINGS
+        for idx, dev in enumerate(devices):
             readings = conn.execute(
                 """SELECT timestamp, date_source, cycle_count, nominal_capacity_mah,
                           full_charge_capacity_mah, design_capacity_mah, health_pct,
                           battery_level_pct, min_soc_pct, max_soc_pct, is_excluded
-                   FROM readings WHERE device_id = ? ORDER BY timestamp ASC LIMIT 50000""",
-                (dev["id"],),
+                   FROM readings WHERE device_id = ? ORDER BY timestamp DESC LIMIT ?""",
+                (dev["id"], MAX_READINGS + 1),
             ).fetchall()
+            if len(readings) > MAX_READINGS:
+                truncated = True
+                truncated_devices.append(dev["name"])
+                readings = readings[:MAX_READINGS]
+            # Restore chronological order; query used DESC to keep newest when truncating.
+            readings = readings[::-1]
+            if total + len(readings) > MAX_EXPORT_TOTAL:
+                truncated = True
+                # List current + all omitted tail devices so importer knows what's missing.
+                truncated_devices.append(dev["name"] + " (total cap)")
+                for tail in devices[idx + 1:]:
+                    truncated_devices.append(tail["name"] + " (omitted)")
+                break
+            total += len(readings)
             out_devices.append(
                 {
                     "name": dev["name"],
@@ -407,13 +544,21 @@ def export_backup(device_ids: str | None = Query(default=None)):
         "version": 1,
         "exported_at": datetime.now(timezone.utc).isoformat(),
         "devices": out_devices,
+        "truncated": truncated,
+        "truncated_devices": truncated_devices,
+        "missing_device_ids": missing_device_ids,
     }
 
 
 @app.post("/api/import")
 def import_backup(payload: BackupFile):
-    """Merge a backup file. Matches devices by name, upserts readings by timestamp."""
-    if payload.version > 1:
+    """Merge a backup file. Matches devices by name, upserts readings by timestamp.
+
+    Strict: Pydantic rejects out-of-range values for the whole backup (422)
+    before per-row `skipped` counting. Imported `upload_id` is detached (None),
+    so re-imported readings lose upload lineage by design.
+    """
+    if payload.version != 1:
         raise HTTPException(422, f"Unsupported backup version {payload.version}")
     if payload.app not in ("cyclewatch", "battery-tracker"):
         raise HTTPException(422, f"Not a Cyclewatch backup file (app={payload.app!r})")
@@ -440,23 +585,36 @@ def import_backup(payload: BackupFile):
                     row2 = conn.execute(
                         "SELECT id FROM devices WHERE name = ?", (name,)
                     ).fetchone()
+                    if row2 is None:
+                        results.append({"name": name, "status": "skipped", "reason": "concurrent delete"})
+                        continue
                     device_id = row2["id"]
                     status = "merged"
             else:
                 device_id = row["id"]
                 status = "merged"
-                if dev.is_excluded:
-                    conn.execute(
-                        "UPDATE devices SET is_excluded = 1 WHERE id = ?", (device_id,)
-                    )
+                conn.execute(
+                    "UPDATE devices SET is_excluded = ? WHERE id = ?",
+                    (1 if dev.is_excluded else 0, device_id),
+                )
             new_count = 0
             updated_count = 0
             skipped = 0
             for r in dev.readings:
-                ts = parse_timestamp(r.timestamp) if r.timestamp else None
+                raw_ts = r.timestamp.strip() if isinstance(r.timestamp, str) else r.timestamp
+                if raw_ts:
+                    ts = parse_timestamp(raw_ts)
+                    if ts is None:
+                        skipped += 1
+                        continue
+                else:
+                    ts = None
+                ds = (r.date_source or "file").strip().lower()
+                if ds not in ("file", "fallback"):
+                    ds = "file"
                 reading = {
                     "timestamp": ts,
-                    "date_source": r.date_source or "file",
+                    "date_source": ds,
                     "cycle_count": r.cycle_count,
                     "nominal_capacity_mah": r.nominal_capacity_mah,
                     "full_charge_capacity_mah": r.full_charge_capacity_mah,
@@ -465,27 +623,17 @@ def import_backup(payload: BackupFile):
                     "battery_level_pct": r.battery_level_pct,
                     "min_soc_pct": r.min_soc_pct,
                     "max_soc_pct": r.max_soc_pct,
+                    "is_excluded": 1 if r.is_excluded else 0,
                 }
                 try:
                     is_new = db.upsert_reading(conn, device_id, None, reading, date.today())
-                except (ValueError, TypeError, sqlite3.Error):
+                except (ValueError, TypeError, AttributeError, OverflowError, sqlite3.Error):
                     skipped += 1
                     continue
                 if is_new:
                     new_count += 1
                 else:
                     updated_count += 1
-                if r.is_excluded:
-                    # upsert preserves is_excluded; enforce backup flag.
-                    # Resolve the effective timestamp text the row was stored under.
-                    eff = ts.isoformat() if ts else None
-                    if eff is None:
-                        # fallback rows use today's date at midnight
-                        eff = datetime.combine(date.today(), datetime.min.time()).isoformat()
-                    conn.execute(
-                        "UPDATE readings SET is_excluded = 1 WHERE device_id = ? AND timestamp = ?",
-                        (device_id, eff),
-                    )
             results.append(
                 {
                     "name": name,
@@ -503,7 +651,10 @@ def import_backup(payload: BackupFile):
 
 @app.get("/")
 def index():
-    return FileResponse(os.path.join(STATIC_DIR, "index.html"))
+    return FileResponse(
+        os.path.join(STATIC_DIR, "index.html"),
+        headers={"Cache-Control": "no-cache"},
+    )
 
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")

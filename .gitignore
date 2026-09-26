@@ -16,6 +16,22 @@ data/*.db-journal
 data/*.db-wal
 data/*.db-shm
 data/uploads/
+data/*.json
+*.ips
+*backup*.json
+
+# Secrets / local env
+.env
+.env.*
+!.env.example
+
+# Local-only notes (never commit)
+/THEORETICAL_BUGS.md
+
+# Backup tarballs (README backup command targets $PWD)
+*.tar.gz
+*.tgz
+cyclewatch-data-backup*
 
 # OS / editors
 .DS_Store

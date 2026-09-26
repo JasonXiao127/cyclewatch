@@ -15,14 +15,24 @@ Battery metrics vary a lot between iOS versions:
   and carry no per-entry timestamp -- only the header line is dated.
 
 So we walk every entry recursively, strip known prefixes ("last_value_",
-"daily_total_") and match the remaining key name against the alias table
-below. Dates come from the entry's own timestamp, falling back to the
-header's timestamp, then to today's date (flagged as "fallback").
+"daily_total_", repeatedly and case-insensitively for stacked prefixes) and
+match the remaining key name against the alias table below (exact, then
+case-insensitive for future renames). Dates come from the entry's own
+timestamp (case-insensitive key match), falling back to the header's
+timestamp, then to no timestamp (flagged as "fallback").
+
+Header rule: only the first non-empty dict line is considered, and only if it
+contains "bug_type" (copied, then skipped as data). Header timestamps are read
+from top-level timestamp/TimeStamp/time/log_time keys (case-insensitive);
+entry timestamps are found by recursive walk. Non-finite numbers (NaN/Inf)
+are dropped; matched-but-uncoercible non-null values are reported as
+unrecognized so new formats aren't silent.
 """
 
 from __future__ import annotations
 
 import json
+import math
 from datetime import datetime
 from typing import Any, Iterator
 
@@ -52,53 +62,101 @@ _KEY_TO_FIELD = {
 _ALL_BATTERY_KEYS = frozenset(_KEY_TO_FIELD)
 
 # Known prefixes that iOS prepends to battery metric keys.
+# Stripped repeatedly, case-insensitively (stacked e.g. last_value_daily_total_X).
 _KEY_PREFIXES = ("last_value_", "daily_total_")
 
 _TIMESTAMP_KEYS = ("timestamp", "TimeStamp", "time", "log_time")
+# Lowercased set for case-insensitive entry matching (Timestamp/TIMESTAMP/...).
+_LOWERED_TIMESTAMP_KEYS = frozenset(k.lower() for k in _TIMESTAMP_KEYS)
 _SCALAR_TYPES = (str, int, float, bool)
 
 
-def _walk(obj: Any) -> Iterator[tuple[str, Any]]:
+def _walk(obj: Any, _depth: int = 0) -> Iterator[tuple[str, Any]]:
     """Recursively yield (key, value) pairs for every scalar leaf."""
+    if _depth > 50:
+        return
     if isinstance(obj, dict):
         for key, value in obj.items():
+            if not isinstance(key, str):
+                continue
             if value is None or isinstance(value, _SCALAR_TYPES):
                 yield key, value
             else:
-                yield from _walk(value)
+                yield from _walk(value, _depth + 1)
     elif isinstance(obj, list):
         for item in obj:
-            yield from _walk(item)
+            yield from _walk(item, _depth + 1)
 
 
 def _strip_prefix(key: str) -> str:
-    for prefix in _KEY_PREFIXES:
-        if key.startswith(prefix):
-            return key[len(prefix):]
-    return key
+    if not isinstance(key, str):
+        return key  # type: ignore[return-value]
+    lowered = key.lower()
+    # Strip repeatedly to handle stacked prefixes, case-insensitively.
+    changed = True
+    current = key
+    current_lower = lowered
+    while changed:
+        changed = False
+        for prefix in _KEY_PREFIXES:
+            if current_lower.startswith(prefix):
+                current = current[len(prefix):]
+                current_lower = current_lower[len(prefix):]
+                changed = True
+                break
+    return current
 
 
 def _match_field(key: str) -> str | None:
+    if not isinstance(key, str):
+        return None
     if key in _KEY_TO_FIELD:
         return _KEY_TO_FIELD[key]
-    return _KEY_TO_FIELD.get(_strip_prefix(key))
+    stripped = _strip_prefix(key)
+    if stripped in _KEY_TO_FIELD:
+        return _KEY_TO_FIELD[stripped]
+    # Case-insensitive fallback for future iOS renames.
+    low = key.lower()
+    for alias, field in _KEY_TO_FIELD.items():
+        if alias.lower() == low:
+            return field
+    slow = stripped.lower()
+    for alias, field in _KEY_TO_FIELD.items():
+        if alias.lower() == slow:
+            return field
+    return None
+
+
+def _is_batteryish(key: str) -> bool:
+    """Heuristic for unknown battery-ish keys. Prefers recall, skips known noise."""
+    lowered = _strip_prefix(key).lower()
+    # Known duplicate variants (e.g. NominalChargeCapacityPrevious) are not mysteries.
+    if lowered.endswith("previous") and lowered[:-8] in (a.lower() for a in _KEY_TO_FIELD):
+        return False
+    return any(
+        word in lowered
+        for word in ("battery", "capacity", "cyclecount", "cycle_count", "cycle count", "soc", "health", "uisoc", "charge")
+    )
 
 
 def _to_number(value: Any) -> float | int | None:
-    """Coerce a scalar into a number; returns None for bools/garbage."""
+    """Coerce a scalar into a number; returns None for bools/garbage/non-finite."""
     if isinstance(value, bool):
         return None
-    if isinstance(value, (int, float)):
+    if isinstance(value, int):
         return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
     if isinstance(value, str):
         text = value.strip()
         try:
             return int(text)
         except ValueError:
             try:
-                return float(text)
+                f = float(text)
             except ValueError:
                 return None
+            return f if math.isfinite(f) else None
     return None
 
 
@@ -142,7 +200,8 @@ def parse_ips_file(text: str) -> dict:
       readings: list of dicts with keys timestamp (datetime | None),
                 date_source ("file" | "fallback"), cycle_count,
                 nominal_capacity_mah, full_charge_capacity_mah,
-                design_capacity_mah, health_pct
+                design_capacity_mah, health_pct, battery_level_pct,
+                min_soc_pct, max_soc_pct
       unrecognized_keys: battery-ish keys that were seen but not matched
     """
     grouped: dict[str, dict] = {}
@@ -152,8 +211,10 @@ def parse_ips_file(text: str) -> dict:
     seen_first_entry = False
     fallback_counter = 0
 
-    for line in text.splitlines():
-        line = line.strip()
+    if text.startswith("\ufeff"):
+        text = text.lstrip("\ufeff")
+    for raw_line in text.splitlines():
+        line = raw_line.lstrip("\ufeff").strip()
         if not line:
             continue
         try:
@@ -165,27 +226,36 @@ def parse_ips_file(text: str) -> dict:
         if not seen_first_entry:
             seen_first_entry = True
             if "bug_type" in entry:
-                header = entry
-                header_ts = parse_timestamp(entry.get("timestamp"))
+                header = dict(entry)
+                lowered = {k.lower(): v for k, v in entry.items()}
+                for hk in _TIMESTAMP_KEYS:
+                    header_ts = parse_timestamp(lowered.get(hk.lower()))
+                    if header_ts is not None:
+                        break
+                continue
 
         found: dict[str, float | int] = {}
         timestamp: datetime | None = None
         # Single walk: collect battery fields and first usable timestamp.
+        # Timestamp match is case-insensitive (Timestamp vs timestamp).
         for key, value in _walk(entry):
-            if timestamp is None and key in _TIMESTAMP_KEYS:
+            if timestamp is None and isinstance(key, str) and key.lower() in _LOWERED_TIMESTAMP_KEYS:
                 timestamp = parse_timestamp(value)
             field = _match_field(key)
             if field is not None:
                 number = _to_number(value)
                 if number is not None:
                     found.setdefault(field, number)
+                elif value is not None and not isinstance(value, bool) and isinstance(key, str):
+                    # Matched field but uncoercible non-null, non-bool value
+                    # (e.g. "N/A"): surface as unrecognized so new formats
+                    # aren't silent. Null/bool are not mystery metrics.
+                    unrecognized.add(key)
             elif (
                 isinstance(value, _SCALAR_TYPES)
                 and not isinstance(value, bool)
-                and any(
-                    word in _strip_prefix(key).lower()
-                    for word in ("battery", "capacity", "cyclecount")
-                )
+                and isinstance(key, str)
+                and _is_batteryish(key)
             ):
                 unrecognized.add(key)
 

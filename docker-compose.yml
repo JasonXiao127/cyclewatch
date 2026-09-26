@@ -11,7 +11,8 @@ services:
     pull_policy: missing
     container_name: cyclewatch
     ports:
-      - "${PORT:-3344}:8000"
+      # Localhost-only by default (no auth). For LAN access use "0.0.0.0:${PORT:-3344}:8000".
+      - "127.0.0.1:${PORT:-3344}:8000"
     volumes:
       - ./data:/app/data
       # Named-volume alternative (avoids host-permission issues):
@@ -22,6 +23,10 @@ services:
     # container can't write, uncomment the next line (uses your host IDs):
     # user: "${UID:-1000}:${GID:-1000}"
     restart: unless-stopped
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     logging:
       driver: json-file
       options:
