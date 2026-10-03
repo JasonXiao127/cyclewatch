@@ -94,14 +94,14 @@ def test_readings_sorted_by_timestamp():
     assert [r["cycle_count"] for r in result["readings"]] == [1, 2, 3]
 
 
-def test_api_roundtrip(tmp_path):
+def test_api_roundtrip(tmp_path, monkeypatch):
     import importlib
-    import os
 
-    os.environ["DATA_DIR"] = str(tmp_path)
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
     from app import database as db
 
     importlib.reload(db)
+    db.init_db()
     from app import main as main_module
 
     importlib.reload(main_module)

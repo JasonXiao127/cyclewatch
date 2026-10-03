@@ -48,11 +48,20 @@ def delete_upload_files_if_orphaned(conn: sqlite3.Connection, sha256: str) -> No
     """Remove stored .ips file(s) if no upload row references the sha anymore."""
     if not _valid_sha(sha256):
         return
+    sha_norm = sha256.lower()
     still_used = conn.execute(
-        "SELECT 1 FROM uploads WHERE sha256 = ? LIMIT 1", (sha256,)
+        "SELECT 1 FROM uploads WHERE sha256 = ? LIMIT 1", (sha_norm,)
     ).fetchone()
     if still_used:
         return
+    # Legacy rows (pre-lowercase normalization) may store uppercase; check raw too.
+    still_used_raw = None
+    if sha_norm != sha256:
+        still_used_raw = conn.execute(
+            "SELECT 1 FROM uploads WHERE sha256 = ? LIMIT 1", (sha256,)
+        ).fetchone()
+        if still_used_raw:
+            return
     for path in (upload_path_for_sha(sha256), legacy_upload_path_for_sha(sha256)):
         try:
             if os.path.isfile(path):
@@ -199,7 +208,7 @@ def upsert_reading(
             return None
         if fv < 0 or fv > 100.0:
             return None
-        return fv
+        return int(round(fv))
 
     nominal = _nonneg_int(reading.get("nominal_capacity_mah"))
     full_charge = _nonneg_int(reading.get("full_charge_capacity_mah"))
@@ -239,15 +248,17 @@ def upsert_reading(
         # Dateless readings would otherwise all share today's midnight and
         # collapse into one row via UNIQUE(device_id, timestamp). Bump by
         # seconds until free so each fallback reading is preserved.
-        # Invariant: MAX_READINGS (50000) < 86400, so same-day fallback batches
-        # always fit. Cross-connection races retry below on IntegrityError.
+        # Same-day slots are midnight..23:59:59 (86400 values). Batches can
+        # exceed one day (20 files * MAX_READINGS plus pre-existing rows),
+        # so exhaustion merges into the last slot rather than looping forever.
+        # Cross-connection races retry below on IntegrityError.
         ts_text = timestamp.isoformat()
         bumps = 0
         while conn.execute(
             "SELECT 1 FROM readings WHERE device_id = ? AND timestamp = ?",
             (device_id, ts_text),
         ).fetchone():
-            if bumps >= 86400:
+            if bumps >= 86399:
                 # Full day exhausted; merge into last slot rather than loop forever.
                 break
             timestamp = timestamp + timedelta(seconds=1)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 import sqlite3
+import uuid
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timezone
 
@@ -33,6 +34,15 @@ async def lifespan(_: FastAPI):
 app = FastAPI(title="Cyclewatch", lifespan=lifespan)
 
 
+@app.middleware("http")
+async def _security_headers(request, call_next):
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "same-origin")
+    return response
+
+
 class DeviceIn(BaseModel):
     name: str = Field(min_length=1, max_length=200)
 
@@ -57,12 +67,14 @@ class BackupReading(BaseModel):
     battery_level_pct: int | None = Field(default=None, ge=0, le=100)
     min_soc_pct: int | None = Field(default=None, ge=0, le=100)
     max_soc_pct: int | None = Field(default=None, ge=0, le=100)
-    is_excluded: bool = False
+    # None = preserve current value on merge; True/False = enforce.
+    is_excluded: bool | None = None
 
 
 class BackupDevice(BaseModel):
     name: str = Field(min_length=1, max_length=200)
-    is_excluded: bool = False
+    # None = preserve current device setting on merge; True/False = enforce.
+    is_excluded: bool | None = None
     readings: list[BackupReading] = Field(default_factory=list)
 
 
@@ -214,7 +226,7 @@ def _store_parsed_upload(
             "cross_device_duplicate": [row[0] for row in others],
         }
     os.makedirs(db.get_uploads_dir(), exist_ok=True)
-    tmp_path = dest + ".tmp"
+    tmp_path = f"{dest}.tmp.{os.getpid()}.{uuid.uuid4().hex}"
     try:
         with open(tmp_path, "wb") as fh:
             fh.write(raw)
@@ -309,7 +321,7 @@ async def upload_files(device_id: int = Form(...), files: list[UploadFile] = Fil
     """Upload one batch. All-or-nothing: one bad file rolls back the whole batch.
 
     Note: up to MAX_UPLOAD_FILES * MAX_UPLOAD_BYTES per request; sequential
-    reads keep peak to one file + parsed readings.
+    chunked reads keep peak to one chunk + parsed readings.
     """
     if len(files) > MAX_UPLOAD_FILES:
         raise HTTPException(413, f"Too many files (max {MAX_UPLOAD_FILES})")
@@ -320,11 +332,20 @@ async def upload_files(device_id: int = Form(...), files: list[UploadFile] = Fil
             if device is None:
                 raise HTTPException(404, "Device not found")
             results = []
-            today = date.today()
+            today = datetime.now(timezone.utc).date()
             for upload_file in files:
-                raw = await upload_file.read()
-                if len(raw) > MAX_UPLOAD_BYTES:
-                    raise HTTPException(413, f"File too large (max {MAX_UPLOAD_BYTES // 1024 // 1024} MB)")
+                chunks: list[bytes] = []
+                total = 0
+                while True:
+                    chunk = await upload_file.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > MAX_UPLOAD_BYTES:
+                        raise HTTPException(413, f"File too large (max {MAX_UPLOAD_BYTES // 1024 // 1024} MB)")
+                    chunks.append(chunk)
+                raw = b"".join(chunks)
+                del chunks
                 filename = _sanitize_filename(upload_file.filename, "unnamed.ips")
                 parsed = parse_ips_file(raw.decode("utf-8", errors="replace"))
                 results.append(_store_parsed_upload(conn, device_id, filename, raw, parsed, today))
@@ -355,14 +376,14 @@ def upload_text(payload: PasteIn):
     if len(content.encode("utf-8")) > MAX_UPLOAD_BYTES:
         raise HTTPException(413, f"Pasted content too large (max {MAX_UPLOAD_BYTES // 1024 // 1024} MB)")
     filename = _sanitize_filename(
-        payload.filename, f"pasted-{datetime.now().strftime('%Y%m%d-%H%M%S')}.ips"
+        payload.filename, f"pasted-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}.ips"
     )
     raw = content.encode("utf-8")
     with db.get_connection() as conn:
         if not conn.execute("SELECT 1 FROM devices WHERE id = ?", (payload.device_id,)).fetchone():
             raise HTTPException(404, "Device not found")
         parsed = parse_ips_file(content)
-        result = _store_parsed_upload(conn, payload.device_id, filename, raw, parsed, date.today())
+        result = _store_parsed_upload(conn, payload.device_id, filename, raw, parsed, datetime.now(timezone.utc).date())
         return {
             "results": [
                 {
@@ -417,6 +438,8 @@ def delete_upload(upload_id: int):
 def list_readings(
     device_id: int | None = None,
     limit: int = Query(default=2000, ge=1, le=50000),
+    offset: int = Query(default=0, ge=0),
+    order: str = Query(default="asc", pattern="^(asc|desc)$"),
 ):
     query = """SELECT r.*, d.name AS device_name, d.is_excluded AS device_excluded
                FROM readings r JOIN devices d ON d.id = r.device_id"""
@@ -424,8 +447,9 @@ def list_readings(
     if device_id is not None:
         query += " WHERE r.device_id = ?"
         params.append(device_id)
-    query += " ORDER BY r.timestamp ASC LIMIT ?"
-    params.append(limit)
+    direction = "DESC" if order == "desc" else "ASC"
+    query += f" ORDER BY r.timestamp {direction} LIMIT ? OFFSET ?"
+    params.extend([limit, offset])
     with db.get_connection() as conn:
         rows = conn.execute(query, params).fetchall()
     return [dict(row) for row in rows]
@@ -511,8 +535,37 @@ def export_backup(device_ids: str | None = Query(default=None)):
             readings = readings[::-1]
             if total + len(readings) > MAX_EXPORT_TOTAL:
                 truncated = True
-                # List current + all omitted tail devices so importer knows what's missing.
-                truncated_devices.append(dev["name"] + " (total cap)")
+                remaining = MAX_EXPORT_TOTAL - total
+                if remaining > 0:
+                    # Keep newest `remaining` readings of the current device
+                    # so the export stays usable instead of dropping it entirely.
+                    readings = readings[-remaining:]
+                    total += len(readings)
+                    out_devices.append(
+                        {
+                            "name": dev["name"],
+                            "is_excluded": bool(dev["is_excluded"]),
+                            "readings": [
+                                {
+                                    "timestamp": r["timestamp"],
+                                    "date_source": r["date_source"],
+                                    "cycle_count": r["cycle_count"],
+                                    "nominal_capacity_mah": r["nominal_capacity_mah"],
+                                    "full_charge_capacity_mah": r["full_charge_capacity_mah"],
+                                    "design_capacity_mah": r["design_capacity_mah"],
+                                    "health_pct": r["health_pct"],
+                                    "battery_level_pct": r["battery_level_pct"],
+                                    "min_soc_pct": r["min_soc_pct"],
+                                    "max_soc_pct": r["max_soc_pct"],
+                                    "is_excluded": bool(r["is_excluded"]),
+                                }
+                                for r in readings
+                            ],
+                        }
+                    )
+                    truncated_devices.append(dev["name"] + " (total cap, partial)")
+                else:
+                    truncated_devices.append(dev["name"] + " (total cap)")
                 for tail in devices[idx + 1:]:
                     truncated_devices.append(tail["name"] + " (omitted)")
                 break
@@ -566,6 +619,7 @@ def import_backup(payload: BackupFile):
     if total > MAX_READINGS:
         raise HTTPException(413, f"Backup too large ({total} readings, max {MAX_READINGS})")
     results = []
+    today = datetime.now(timezone.utc).date()
     with db.get_connection() as conn:
         for dev in payload.devices:
             name = dev.name.strip()
@@ -590,13 +644,19 @@ def import_backup(payload: BackupFile):
                         continue
                     device_id = row2["id"]
                     status = "merged"
+                    if dev.is_excluded is not None:
+                        conn.execute(
+                            "UPDATE devices SET is_excluded = ? WHERE id = ?",
+                            (1 if dev.is_excluded else 0, device_id),
+                        )
             else:
                 device_id = row["id"]
                 status = "merged"
-                conn.execute(
-                    "UPDATE devices SET is_excluded = ? WHERE id = ?",
-                    (1 if dev.is_excluded else 0, device_id),
-                )
+                if dev.is_excluded is not None:
+                    conn.execute(
+                        "UPDATE devices SET is_excluded = ? WHERE id = ?",
+                        (1 if dev.is_excluded else 0, device_id),
+                    )
             new_count = 0
             updated_count = 0
             skipped = 0
@@ -623,11 +683,11 @@ def import_backup(payload: BackupFile):
                     "battery_level_pct": r.battery_level_pct,
                     "min_soc_pct": r.min_soc_pct,
                     "max_soc_pct": r.max_soc_pct,
-                    "is_excluded": 1 if r.is_excluded else 0,
+                    "is_excluded": None if r.is_excluded is None else (1 if r.is_excluded else 0),
                 }
                 try:
-                    is_new = db.upsert_reading(conn, device_id, None, reading, date.today())
-                except (ValueError, TypeError, AttributeError, OverflowError, sqlite3.Error):
+                    is_new = db.upsert_reading(conn, device_id, None, reading, today)
+                except (ValueError, TypeError, AttributeError, OverflowError):
                     skipped += 1
                     continue
                 if is_new:
